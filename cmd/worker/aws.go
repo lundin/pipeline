@@ -24,13 +24,20 @@ import (
 )
 
 func registerAwsWorkflows(
+	config configuration,
 	clusters *pkeworkflowadapter.ClusterManagerAdapter,
 	tokenGenerator pkeworkflowadapter.TokenGenerator,
 	secretStore pkeworkflow.SecretStore,
 	imageSelector pkeaws.ImageSelector,
-	pkeGlobalRegion string,
 ) {
-	workflow.RegisterWithOptions(pkeworkflow.CreateClusterWorkflow{GlobalRegion: pkeGlobalRegion}.Execute, workflow.RegisterOptions{Name: pkeworkflow.CreateClusterWorkflowName})
+	createClusterWorkflow := pkeworkflow.CreateClusterWorkflow{
+		DefaultNodeVolumeSize: config.Distribution.PKE.Amazon.DefaultNodeVolumeSize,
+		GlobalRegion:          config.Distribution.PKE.Amazon.GlobalRegion,
+	}
+	workflow.RegisterWithOptions(
+		createClusterWorkflow.Execute, workflow.RegisterOptions{Name: pkeworkflow.CreateClusterWorkflowName},
+	)
+
 	workflow.RegisterWithOptions(pkeworkflow.DeleteClusterWorkflow, workflow.RegisterOptions{Name: pkeworkflow.DeleteClusterWorkflowName})
 	workflow.RegisterWithOptions(pkeworkflow.UpdateClusterWorkflow, workflow.RegisterOptions{Name: pkeworkflow.UpdateClusterWorkflowName})
 
