@@ -85,16 +85,47 @@ type NodePoolUpdateDrainOptions struct {
 
 // NodePool encapsulates information about a cluster node pool.
 type NodePool struct {
-	Name         string            `mapstructure:"name"`
-	Labels       map[string]string `mapstructure:"labels"`
-	Size         int               `mapstructure:"size"`
-	Autoscaling  Autoscaling       `mapstructure:"autoscaling"`
-	VolumeSize   int               `mapstructure:"volumeSize"`
-	InstanceType string            `mapstructure:"instanceType"`
-	Image        string            `mapstructure:"image"`
-	SpotPrice    string            `mapstructure:"spotPrice"`
-	SubnetID     string            `mapstructure:"subnetId"`
+	Name          string            `mapstructure:"name"`
+	Labels        map[string]string `mapstructure:"labels"`
+	Size          int               `mapstructure:"size"`
+	Autoscaling   Autoscaling       `mapstructure:"autoscaling"`
+	VolumeSize    int               `mapstructure:"volumeSize"`
+	InstanceType  string            `mapstructure:"instanceType"`
+	Image         string            `mapstructure:"image"`
+	SpotPrice     string            `mapstructure:"spotPrice"`
+	SubnetID      string            `mapstructure:"subnetId"`
+	Status        NodePoolStatus    `mapstructure:"status"`
+	StatusMessage string            `mapstructure:"statusMessage"`
 }
+
+// NodePoolStatus represents the possible states of a node pool.
+type NodePoolStatus string
+
+const (
+	// NodePoolStatusCreating is the status used when the node pool resources
+	// are being provisioned.
+	NodePoolStatusCreating NodePoolStatus = "CREATING"
+
+	// NodePoolStatusDeleting is the status used when the node pool resources
+	// are being removed.
+	NodePoolStatusDeleting NodePoolStatus = "DELETING"
+
+	// NodePoolStatusCreating is the status returned when the node pool
+	// is in an invalid state or an operation cannot be performed on it.
+	NodePoolStatusError NodePoolStatus = "ERROR"
+
+	// NodePoolStatusCreating is the status returned when the node pool
+	// is in a healthy, idle state.
+	NodePoolStatusReady NodePoolStatus = "READY"
+
+	// NodePoolStatusUnknown is the status returned when the node pool cannot be
+	// examined.
+	NodePoolStatusUnknown NodePoolStatus = "UNKNOWN"
+
+	// NodePoolStatusUpdating is the status returned when the node pool
+	// resources are being changed.
+	NodePoolStatusUpdating NodePoolStatus = "UPDATING"
+)
 
 // Autoscaling describes the EKS node pool's autoscaling settings.
 type Autoscaling struct {

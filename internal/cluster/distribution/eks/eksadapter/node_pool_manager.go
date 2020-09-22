@@ -16,9 +16,11 @@ package eksadapter
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"emperror.dev/errors"
+	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/cloudformation"
 	"go.uber.org/cadence/client"
 
@@ -145,21 +147,52 @@ func (n nodePoolManager) ListNodePools(ctx context.Context, cluster cluster.Clus
 
 	cfClient := n.cloudFormationFactory.New(awsClient)
 	describeStacksInput := cloudformation.DescribeStacksInput{}
+	var stackStatuses map[string]*cloudformation.StackSummary
 	nodePools := make([]eks.NodePool, 0, len(nodePoolNames))
 	for _, nodePoolName := range nodePoolNames {
+		nodePools = append(nodePools, eks.NodePool{
+			Name:   nodePoolName,
+			Labels: labelSets[nodePoolName],
+		})
+		nodePool := &nodePools[len(nodePools)-1]
+
 		stackName := generateNodePoolStackName(cluster.Name, nodePoolName)
 		describeStacksInput.StackName = &stackName
 		stackDescriptions, err := cfClient.DescribeStacks(&describeStacksInput)
 		if err != nil {
-			return nil, errors.WrapWithDetails(err, "retrieving node pool cloudformation stack failed",
-				"cluster", cluster,
-				"input", describeStacksInput,
-			)
+			if stackStatuses == nil {
+				listStacksOutput, err := cfClient.ListStacks(&cloudformation.ListStacksInput{
+					StackStatusFilter: aws.StringSlice(getNonDescrabableStackStatuses()),
+				})
+				if err != nil {
+					return nil, errors.WrapWithDetails(err, "listing node pool cloudformation stacks failed",
+						"cluster", cluster,
+					)
+				}
+
+				stackStatuses = make(map[string]*cloudformation.StackSummary, len(listStacksOutput.StackSummaries))
+				for _, summary := range listStacksOutput.StackSummaries {
+					stackStatuses[aws.StringValue(summary.StackName)] = summary
+				}
+			}
+
+			summary, isExisting := stackStatuses[stackName]
+			if !isExisting {
+				nodePool.Status = eks.NodePoolStatusUnknown
+				nodePool.StatusMessage = "Retrieving node pool information failed: CloudFormation stack information is not available."
+
+				continue
+			}
+
+			nodePool.Status = NewNodePoolStatusFromCFStack(aws.StringValue(summary.StackStatus))
+			nodePool.StatusMessage = aws.StringValue(summary.StackStatusReason)
+
+			continue
 		} else if len(stackDescriptions.Stacks) == 0 {
-			return nil, errors.NewWithDetails("missing required node pool cloudformation stack",
-				"cluster", cluster,
-				"stackName", stackName,
-			)
+			nodePool.Status = eks.NodePoolStatusError
+			nodePool.StatusMessage = "Retrieving node pool information failed: CloudFormation stack not found."
+
+			continue
 		}
 
 		var nodePoolParameters struct {
@@ -176,28 +209,62 @@ func (n nodePoolManager) ListNodePools(ctx context.Context, cluster cluster.Clus
 
 		err = sdkCloudFormation.ParseStackParameters(stackDescriptions.Stacks[0].Parameters, &nodePoolParameters)
 		if err != nil {
-			return nil, errors.WrapWithDetails(err, "parsing node pool stack parameters failed",
-				"stackName", stackName)
+			nodePool.Status = eks.NodePoolStatusError
+			nodePool.StatusMessage = "Retrieving node pool information failed: invalid CloudFormation stack parameters."
+
+			continue
 		}
 
-		nodePool := eks.NodePool{
-			Name:   nodePoolName,
-			Labels: labelSets[nodePoolName],
-			Size:   nodePoolParameters.NodeAutoScalingInitSize,
-			Autoscaling: eks.Autoscaling{
-				Enabled: nodePoolParameters.ClusterAutoscalerEnabled,
-				MinSize: nodePoolParameters.NodeAutoScalingGroupMinSize,
-				MaxSize: nodePoolParameters.NodeAutoScalingGroupMaxSize,
-			},
-			VolumeSize:   nodePoolParameters.NodeVolumeSize,
-			InstanceType: nodePoolParameters.NodeInstanceType,
-			Image:        nodePoolParameters.NodeImageID,
-			SpotPrice:    nodePoolParameters.NodeSpotPrice,
-			SubnetID:     nodePoolParameters.Subnets, // Note: currently we ensure exactly 1 value at creation.
+		nodePool.Size = nodePoolParameters.NodeAutoScalingInitSize
+		nodePool.Autoscaling = eks.Autoscaling{
+			Enabled: nodePoolParameters.ClusterAutoscalerEnabled,
+			MinSize: nodePoolParameters.NodeAutoScalingGroupMinSize,
+			MaxSize: nodePoolParameters.NodeAutoScalingGroupMaxSize,
 		}
-
-		nodePools = append(nodePools, nodePool)
+		nodePool.VolumeSize = nodePoolParameters.NodeVolumeSize
+		nodePool.InstanceType = nodePoolParameters.NodeInstanceType
+		nodePool.Image = nodePoolParameters.NodeImageID
+		nodePool.SpotPrice = nodePoolParameters.NodeSpotPrice
+		nodePool.SubnetID = nodePoolParameters.Subnets // Note: currently we ensure a single value at creation.
+		nodePool.Status = NewNodePoolStatusFromCFStack(aws.StringValue(stackDescriptions.Stacks[0].StackStatus))
+		nodePool.StatusMessage = aws.StringValue(stackDescriptions.Stacks[0].StackStatusReason)
 	}
 
 	return nodePools, nil
+}
+
+// getNonDescrabableStackStatuses returns the status values to filter for in a ListStacks
+// request to retrieve information about non-describable stacks.
+func getNonDescrabableStackStatuses() (listStatuses []string) {
+	statuses := cloudformation.StackStatus_Values()
+	listStatuses = make([]string, 0, len(statuses))
+	for _, status := range cloudformation.StackStatus_Values() {
+		if strings.HasSuffix(status, "_FAILED") || // Note: failed statuses such as create failed are potentially non-describable.
+			status == cloudformation.StackStatusDeleteInProgress { // Note: for some reason delete operation returns errors on describe for a couple seconds at the end.
+			listStatuses = append(listStatuses, status)
+		}
+	}
+
+	return listStatuses
+}
+
+// NewNodePoolStatusFromCFStack translates a CloudFormation stack status into a
+// node pool status.
+func NewNodePoolStatusFromCFStack(cfStackStatus string) (nodePoolStatus eks.NodePoolStatus) {
+	switch {
+	case strings.HasSuffix(cfStackStatus, "_FAILED"):
+		return eks.NodePoolStatusError
+	case strings.HasSuffix(cfStackStatus, "_COMPLETE"):
+		return eks.NodePoolStatusReady
+	case strings.HasSuffix(cfStackStatus, "_IN_PROGRESS"):
+		if cfStackStatus == cloudformation.StackStatusCreateInProgress {
+			return eks.NodePoolStatusCreating
+		} else if cfStackStatus == cloudformation.StackStatusDeleteInProgress {
+			return eks.NodePoolStatusDeleting
+		}
+
+		return eks.NodePoolStatusUpdating
+	default:
+		return eks.NodePoolStatusUnknown
+	}
 }
